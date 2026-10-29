@@ -1,0 +1,63 @@
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---- Secrets & env ----
+# .env.example IS committed; actual .env files are not.
+.env
+.env.local
+.env.*.local
+*.secret
+secrets/
+
+# ---- Node / app ----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+coverage/
+.nyc_output/
+dist/
+build/
+
+# ---- Terraform ----
+# Never commit state (may contain secrets) or local plugin caches.
+# .tfvars holds environment-specific values; commit .tfvars.example instead.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+
+# ---- Ansible ----
+*.retry
+ansible/vault_pass.txt
+ansible/.vault_pass
+
+# ---- SSH keys ----
+# Keys generated for this project should live outside the repo (~/.ssh/)
+# but belt-and-braces in case someone drops one in by accident.
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+
+# ---- Docker ----
+.docker/
+
+# ---- Logs ----
+*.log
+logs/
