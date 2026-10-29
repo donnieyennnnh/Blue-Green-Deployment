@@ -1,0 +1,22 @@
+# terraform.tfvars.example — copy to terraform.tfvars and edit.
+# terraform.tfvars is gitignored so your real values never leak.
+#
+#   cp terraform.tfvars.example terraform.tfvars    # macOS/Linux/WSL
+#   Copy-Item terraform.tfvars.example terraform.tfvars   # PowerShell
+
+aws_profile = "blue-green"
+aws_region  = "ap-southeast-1"
+
+# Your public IP in CIDR form.
+# Find it:  curl ifconfig.me   then append /32
+# If your IP changes (café, home router reboot), re-run `terraform apply`
+# with the new value — it just updates the security group rule.
+my_ip_cidr = "203.0.113.42/32"
+
+# Path to the SSH *public* key. Generate the pair first:
+#   ssh-keygen -t ed25519 -f $HOME\.ssh\bobross-gallery -C "bobross-gallery"
+# (hit Enter twice to skip the passphrase)
+ssh_public_key_path = "~/.ssh/bobross-gallery.pub"
+
+# Free-tier eligible for 12 months on new accounts.
+instance_type = "t3.micro"
