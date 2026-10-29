@@ -1,0 +1,20 @@
+# Local development convenience: one command to build and run the app.
+#
+#   docker compose up --build       # build + run (Ctrl+C to stop)
+#   docker compose up -d --build    # same, detached
+#   docker compose down             # stop and remove
+#
+# Phase 6 will add a sibling "green" service and an Nginx front-end in a
+# separate compose file under deploy/.
+
+services:
+  app:
+    build: .
+    image: bobross-gallery:local
+    container_name: bobross-gallery
+    ports:
+      - "3000:3000"
+    environment:
+      APP_COLOR: blue
+      APP_PORT: 3000
+    restart: unless-stopped

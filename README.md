@@ -11,8 +11,8 @@ This is a learning / portfolio project. It stitches together the tools a modern 
 Built in phases, one at a time. Current phase is checked.
 
 - [x] **Phase 0** — Prerequisites + repo scaffold
-- [ ] **Phase 1** — Node.js Express app + Dockerfile
-- [ ] **Phase 2** — Terraform: AWS VPC + single EC2 + firewall + SSH key
+- [x] **Phase 1** — Node.js Express app + Dockerfile
+- [x] **Phase 2** — Terraform: AWS VPC + single EC2 + firewall + SSH key
 - [ ] **Phase 3** — Ansible: SSH hardening, UFW, fail2ban, Docker, Nginx
 - [ ] **Phase 4** — GitHub Actions CI: lint, test, build & push to GHCR
 - [ ] **Phase 5** — GitHub Actions CD: SSH deploy to EC2
@@ -82,13 +82,13 @@ Detailed walkthroughs are given at the end of Phase 0 in the chat; condensed ver
 
 Everything in this project is designed to be destroyed with `terraform destroy` in one command. The only AWS resource that costs money is the single EC2 instance.
 
-Rough costs (us-east-1):
-- t3.micro: **free** for 750 hr/month on new AWS accounts (12-month free tier); ~$0.0104/hr afterward
-- EBS gp3 8 GB root volume: ~$0.64/month
+Rough costs (ap-southeast-1 / Singapore):
+- t3.micro: **free** for 750 hr/month on new AWS accounts (12-month free tier, same in every region); ~$0.0132/hr afterward
+- EBS gp3 8 GB root volume: ~$0.80/month
 - VPC, subnet, IGW, SG, key pair: **free**
 - Data out: free tier gives 100 GB/month across all services
 
-Expect **$0** during free-tier eligibility, **~$8/month** after.
+Expect **$0** during free-tier eligibility, **~$10/month** after. Singapore is ~25% more expensive than us-east-1 but much lower latency from South-East Asia.
 
 > Note on container registry: this project uses **GHCR** (GitHub Container Registry) rather than AWS ECR. GHCR is free for public images and simpler to authenticate from GitHub Actions. ECR would be the AWS-native choice if you were running this at a job — mentioned here for completeness.
 
@@ -114,7 +114,32 @@ Keys and tokens never appear in Terraform `.tf` files, Ansible playbooks, Docker
 
 ## Running locally
 
-Each phase adds its own "how to run" section. Phase 0 has nothing to run — only files to inspect.
+### The app (Phase 1)
+
+Three ways to run, in order of "closest to what runs in production":
+
+```powershell
+# 1. Docker Compose (recommended — one command, matches CI/prod)
+cd app
+docker compose up --build
+
+# 2. Plain docker (useful for debugging the Dockerfile itself)
+cd app
+docker build -t bobross-gallery:local .
+docker run --rm -p 3000:3000 -e APP_COLOR=blue bobross-gallery:local
+
+# 3. Node directly (fastest edit-reload loop while developing)
+cd app
+npm install
+npm run dev     # restarts on file change
+```
+
+Once running, open:
+- http://localhost:3000 — colored landing page showing which instance you hit
+- http://localhost:3000/health — `{"status":"ok","color":"blue","uptime_seconds":N}`
+- http://localhost:3000/metrics — Prometheus exposition format
+
+Stop with `Ctrl+C` (plain docker/npm) or `docker compose down` (compose).
 
 ## Problems I hit and how I solved them
 
