@@ -1,149 +1,109 @@
 # Blue-Green Deployment Pipeline
 
-> A zero-downtime CI/CD pipeline on AWS. One `terraform apply` to provision, one `git push` to deploy, one script to roll back. Monitored by Prometheus + Grafana.
+> Zero-downtime CI/CD pipeline on AWS. One `git push` to deploy and one click to roll back.
 
-## Why this project exists
+This project is to have a automated server deployment through using the CICD pipeline which uses Infrastructure-as-Code, configuration management, containers, zero-downtime deployment, observability and Blue green deployment with security practises
 
-This is a learning / portfolio project. It stitches together the tools a modern DevOps role expects you to know — IaC, config management, containerization, CI/CD, zero-downtime deployment, observability — into one end-to-end story on real cloud infrastructure.
+## TL;DR
 
-## Status
+- **Infra:** Terraform provisions a single EC2 + VPC in AWS `ap-southeast-1`
+- **Config:** Ansible hardens SSH, installs Docker/Nginx, UFW, fail2ban
+- **App:** Dockerised Node.js Express app ("Bob Ross gallery") with health + Prometheus metrics endpoints
+- **CI:** GitHub Actions runs lint + tests + builds the image to GHCR
+- **CD:** GitHub Actions SSHes to the EC2 and runs a blue-green deploy — new container boots, health-checks, Nginx upstream flips, old container stays as rollback
+- **Rollback:** one-click manual GitHub Actions workflow flips Nginx back; takes under 1 second
+- **Monitoring:** Prometheus + Grafana + node_exporter stack with a provisioned dashboard and alert rule, accessed via SSH tunnel
+- **Security:** GitHub OIDC federation (no stored AWS keys), least-privilege IAM, ephemeral SG rules opened per-deploy, non-root containers, SSH key-only auth
 
-Built in phases, one at a time. Current phase is checked.
+**Full architecture:** [docs/architecture.md](docs/architecture.md) · **Troubleshooting:** [docs/troubleshooting.md](docs/troubleshooting.md)
 
-- [x] **Phase 0** — Prerequisites + repo scaffold
-- [x] **Phase 1** — Node.js Express app + Dockerfile
-- [x] **Phase 2** — Terraform: AWS VPC + single EC2 + firewall + SSH key
-- [x] **Phase 3** — Ansible: SSH hardening, UFW, fail2ban, Docker, Nginx
-- [x] **Phase 4** — GitHub Actions CI: lint, test, build & push to GHCR
-- [x] **Phase 5** — GitHub Actions CD: SSH deploy to EC2
-- [x] **Phase 6** — Blue-green containers + Nginx switch + rollback script
-- [x] **Phase 7** — Prometheus + Grafana (dashboards as code, one alert)
-- [ ] **Phase 8** — Polish: architecture diagram, screenshots, troubleshooting notes
 
-## Architecture
-
-Diagram will be added in Phase 8. In short:
+## Architecture at a glance
 
 ```
-GitHub ──push──▶ GitHub Actions ──build──▶ GHCR
-                                            │
-                                            ▼
-                     ┌────────── EC2 (t3.micro) ──────────┐
-                     │  Nginx  ──▶  app-blue  (:3000)     │
-                     │          └▶  app-green (:3001)     │
-                     │  Prometheus + Grafana + node_exp.  │
-                     └────────────────────────────────────┘
+Developer ─push──▶ GitHub ─CI─▶ GHCR
+                     │
+                     └─CD (OIDC) ─▶ EC2 ap-southeast-1
+                                       │
+                                       ├─ Nginx :80 ──▶ blue  :3001
+                                       │               └▶ green :3002  (one active, one standby)
+                                       │
+                                       ├─ Prometheus + Grafana + node_exporter (via SSH tunnel)
+                                       └─ UFW + fail2ban + hardened sshd
 ```
 
-Nginx picks one color as "live" via an upstream config file. Deploys target the inactive color, health-check, then flip the upstream and `nginx -s reload`. Rollback flips it back.
+Full Mermaid diagram with sequence flow in [docs/architecture.md](docs/architecture.md).
 
 ## Repository layout
 
 ```
-app/                   Node.js Express app + Dockerfile          (Phase 1)
-terraform/             AWS VPC, EC2, SG, key pair, outputs       (Phase 2)
-ansible/               Playbooks: hardening, Docker, Nginx       (Phase 3)
-deploy/                Blue-green switch + rollback scripts      (Phase 6)
-monitoring/            Prometheus config, Grafana dashboards     (Phase 7)
-.github/workflows/     CI (lint/test/build) + CD (deploy)        (Phases 4-5)
-docs/                  Architecture diagram, troubleshooting     (Phase 8)
+app/                    Node.js Express app + Dockerfile          
+terraform/              AWS VPC, EC2, SG, key pair, outputs       
+ansible/                Playbook: hardening, Docker, Nginx        
+deploy/                 deploy.sh + rollback.sh                   
+monitoring/             Prometheus + Grafana + node_exporter      
+.github/workflows/      ci.yml (test + build + deploy)            
+                        rollback.yml (manual trigger)
+docs/                   architecture.md, troubleshooting.md       
 ```
 
-## Prerequisites
+## Running the app locally (without AWS)
 
-**You already have:** Git, Node.js 20+, npm, Docker Desktop, WSL2 (Ubuntu).
-
-**You need to install before Phase 2:**
-
-| Tool | What for | Install (PowerShell) |
-|---|---|---|
-| Terraform CLI | Phase 2 infra provisioning | `winget install HashiCorp.Terraform` |
-| AWS CLI v2 | Credential config + debugging | `winget install Amazon.AWSCLI` |
-
-**Verify both after install:**
-```powershell
-terraform -version
-aws --version
-```
-
-Ansible (Phase 3) runs from WSL, not Windows. We'll install it inside WSL when we get there.
-
-## Setup (one-time, done in Phase 0)
-
-Before any infrastructure gets provisioned, do these in the AWS console:
-
-1. **Set a Budget alert.** AWS Billing → Budgets → Create → "Zero spend budget" (notifies at $0.01) or "Monthly cost budget" at $10 with email alerts at 50%/80%/100%. This protects you from runaway costs. See the **AWS cost safety** section below.
-2. **Create a dedicated IAM user for Terraform.** Never use root credentials with Terraform. See the **IAM user setup** section below.
-3. **Copy `.env.example` to `.env`** and fill in values as you go. Phase 0 only needs `AWS_REGION` and `MY_IP_CIDR`.
-
-Detailed walkthroughs are given at the end of Phase 0 in the chat; condensed versions will live here in Phase 8.
-
-## Cost safety
-
-Everything in this project is designed to be destroyed with `terraform destroy` in one command. The only AWS resource that costs money is the single EC2 instance.
-
-Rough costs (ap-southeast-1 / Singapore):
-- t3.micro: **free** for 750 hr/month on new AWS accounts (12-month free tier, same in every region); ~$0.0132/hr afterward
-- EBS gp3 8 GB root volume: ~$0.80/month
-- VPC, subnet, IGW, SG, key pair: **free**
-- Data out: free tier gives 100 GB/month across all services
-
-Expect **$0** during free-tier eligibility, **~$10/month** after. Singapore is ~25% more expensive than us-east-1 but much lower latency from South-East Asia.
-
-> Note on container registry: this project uses **GHCR** (GitHub Container Registry) rather than AWS ECR. GHCR is free for public images and simpler to authenticate from GitHub Actions. ECR would be the AWS-native choice if you were running this at a job — mentioned here for completeness.
-
-## Terraform state
-
-State lives in `terraform/terraform.tfstate` locally. This is fine for a solo project. To move to remote state later:
-
-1. Create an S3 bucket (versioning on) and a DynamoDB table (`LockID` as string PK) for state locking
-2. Add a `backend "s3" {...}` block to `terraform/main.tf`
-3. Run `terraform init -migrate-state`
-
-Local state is gitignored (see `.gitignore`), so it never leaks to the repo.
-
-## Secrets
-
-Nothing sensitive is committed. The flow:
-
-- `.env.example` — committed, lists every variable the project uses
-- `.env` — gitignored, holds real values on your machine
-- GitHub Actions Secrets — used by CI/CD workflows (set via repo Settings → Secrets)
-
-Keys and tokens never appear in Terraform `.tf` files, Ansible playbooks, Dockerfiles, or workflow YAML.
-
-## Running locally
-
-### The app (Phase 1)
-
-Three ways to run, in order of "closest to what runs in production":
+For dev work without touching AWS:
 
 ```powershell
-# 1. Docker Compose (recommended — one command, matches CI/prod)
 cd app
 docker compose up --build
-
-# 2. Plain docker (useful for debugging the Dockerfile itself)
-cd app
-docker build -t bobross-gallery:local .
-docker run --rm -p 3000:3000 -e APP_COLOR=blue bobross-gallery:local
-
-# 3. Node directly (fastest edit-reload loop while developing)
-cd app
-npm install
-npm run dev     # restarts on file change
+# http://localhost:3000
 ```
 
-Once running, open:
-- http://localhost:3000 — colored landing page showing which instance you hit
-- http://localhost:3000/health — `{"status":"ok","color":"blue","uptime_seconds":N}`
-- http://localhost:3000/metrics — Prometheus exposition format
+Or with Node directly:
 
-Stop with `Ctrl+C` (plain docker/npm) or `docker compose down` (compose).
+```powershell
+cd app
+npm install
+npm run dev    # auto-restarts on file change
+```
+
+Both work independently of the production stack.
+
+## Tearing it down
+
+Costs stop the moment you destroy:
+
+```powershell
+cd terraform
+terraform destroy
+```
+
+Local state file + SSH keys stay on your machine. Next session, `terraform apply` recreates everything in ~60 seconds with a new public IP.
 
 ## Problems I hit and how I solved them
 
-(Written up as the project progresses — Phase 8 consolidates them.)
+Real debugging journey captured in [docs/troubleshooting.md](docs/troubleshooting.md). Highlights:
+
+- **Terraform:** Asked AWS for a specific Ubuntu image by name, but the name was slightly different in the Singapore region than elsewhere. Fixed by using a wildcard so any matching name works
+- **Ansible:** Ubuntu's Singapore software mirror kept serving corrupted data mid-install. Switched to the main global mirror. Also had to turn on an extra package list before `fail2ban` could be found
+- **GitHub OIDC:** AWS kept rejecting the token even with a seemingly correct trust policy. Discovered via CloudTrail that GitHub was sending the new immutable-subject format with internal numeric IDs (`repo:owner@12345/repo@67890:...`), not the classic `repo:owner/repo:...`
+- **Monitoring:** Prometheus couldn't scrape the app containers — spent time understanding Docker networking before realizing the containers bound to `127.0.0.1` on the host weren't reachable from Prometheus's own private network. Solution: `network_mode: host` for all three monitoring containers
+
+## Future improvements
+
+Documented but intentionally not implemented to keep scope bounded:
+- **ECR instead of GHCR** — AWS-native registry, standard choice at job
+- **AWS Systems Manager Session Manager** — eliminates the SSH key secret entirely
+- **S3 remote Terraform state** — needed if more than one person works on this
+- **AWS Certificate Manager + HTTPS on Nginx** — Let's Encrypt or ACM
+- **Alertmanager + Slack/email notifications** — alerts currently show in the Prometheus UI only
+- **Multi-AZ with a load balancer** — for production, swap the single EC2 for an ALB + multi-AZ Auto Scaling Group
+- **Kubernetes** — the "right" scale answer; demonstrated manually here to make the mechanics explicit
+
+## Why this stack
+
+- **Chose single-EC2 + manual blue-green instead of Kubernetes/ECS** to demonstrate deployment mechanics without the orchestrator hiding them. Production would use ECS or K8s rolling updates; the understanding translates directly
+- **Chose GHCR over ECR** — zero AWS setup for registry auth, free for public images, authenticated via the built-in `GITHUB_TOKEN`
+- **Chose OIDC federation over long-lived AWS keys** — eliminates the "keys leaked from GitHub secrets" risk entirely
+- **Chose Nginx config swap over an application load balancer** — $20/month saved and the pattern is easier to debug when something breaks
 
 ## License
 
