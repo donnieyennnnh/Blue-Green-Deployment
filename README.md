@@ -15,7 +15,7 @@ This project is to have a automated server deployment through using the CICD pip
 - **Monitoring:** Prometheus + Grafana + node_exporter stack with a provisioned dashboard and alert rule, accessed via SSH tunnel
 - **Security:** GitHub OIDC federation (no stored AWS keys), least-privilege IAM, ephemeral SG rules opened per-deploy, non-root containers, SSH key-only auth
 
-**Full architecture:** [docs/architecture.md](docs/architecture.md) · **Troubleshooting:** [docs/troubleshooting.md](docs/troubleshooting.md)
+**Full architecture:** [docs/architecture.md](docs/architecture.md) · 
 
 
 ## Architecture at a glance
