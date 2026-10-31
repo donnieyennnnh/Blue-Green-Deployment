@@ -172,7 +172,7 @@ jobs:
               -o UserKnownHostsFile=/dev/null \
               -i ~/.ssh/deploy_key \
               ubuntu@${{ steps.aws.outputs.ip }} \
-              IMAGE="$IMAGE" APP_COLOR=blue bash < deploy/deploy.sh
+              IMAGE="$IMAGE" bash < deploy/deploy.sh
 
       - name: Revoke temporary SSH access
         if: always()   # run cleanup even if deploy failed

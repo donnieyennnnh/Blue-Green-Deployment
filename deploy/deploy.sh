@@ -1,74 +1,120 @@
 #!/usr/bin/env bash
-# deploy.sh — runs on the EC2 via `ssh ... bash < deploy/deploy.sh`.
+# deploy.sh — Blue-green deploy, runs on the EC2 via `ssh ... bash < deploy.sh`.
 #
-# Expected env vars (set by the SSH command line, see .github/workflows/ci.yml):
-#   IMAGE      — full image ref, e.g. ghcr.io/<user>/bobross-gallery:sha-abc123
-#   APP_COLOR  — "blue" or "green" (Phase 5 uses "blue"; Phase 6 toggles)
+# Expected env vars (set by the SSH command line in ci.yml):
+#   IMAGE  — full image ref, e.g. ghcr.io/<user>/bobross-gallery:sha-abc123
 #
 # What this does:
-#   1. docker pull the image
-#   2. stop + remove the old container (if present)
-#   3. start the new container on localhost:3000
-#   4. write an Nginx reverse-proxy config  (80 → 127.0.0.1:3000)
-#   5. reload Nginx
-#   6. health-check through Nginx (http://localhost/health)
+#   1. Figure out which color is currently live by reading the Nginx upstream
+#   2. Pull the new image
+#   3. Start the OPPOSITE color on its port, running the new image
+#   4. Health-check that new container directly (not through Nginx)
+#   5. Swap the Nginx upstream to the new color + reload
+#   6. Leave the previously-live color running as a rollback safety net
+#
+# Idempotent: safe to re-run. Zero downtime: Nginx reload is sub-second and
+# the previous container keeps serving while the new one starts up.
 
 set -euo pipefail
 
 IMAGE="${IMAGE:?IMAGE env var required}"
-APP_COLOR="${APP_COLOR:-blue}"
-CONTAINER_NAME="bobross-gallery"
 
+NGINX_CONF="/etc/nginx/sites-available/bobross-gallery"
+BLUE_PORT=3001
+GREEN_PORT=3002
+BLUE_NAME="bobross-gallery-blue"
+GREEN_NAME="bobross-gallery-green"
+
+# ---------- 1. Determine current live color ----------
+if [[ -f "$NGINX_CONF" ]] && grep -q "127.0.0.1:$BLUE_PORT" "$NGINX_CONF"; then
+  CURRENT=blue;  NEW=green; NEW_PORT=$GREEN_PORT; NEW_NAME=$GREEN_NAME
+elif [[ -f "$NGINX_CONF" ]] && grep -q "127.0.0.1:$GREEN_PORT" "$NGINX_CONF"; then
+  CURRENT=green; NEW=blue;  NEW_PORT=$BLUE_PORT;  NEW_NAME=$BLUE_NAME
+else
+  # First blue-green deploy — nothing is live yet (or we're coming from Phase 5)
+  CURRENT=none;  NEW=blue;  NEW_PORT=$BLUE_PORT;  NEW_NAME=$BLUE_NAME
+fi
+
+echo "==> Current live color: $CURRENT"
+echo "==> Deploying new version to inactive color: $NEW (port $NEW_PORT)"
+
+# ---------- 2. Pull new image ----------
 echo "==> Pulling $IMAGE"
 docker pull "$IMAGE"
 
-echo "==> Stopping + removing old container (if any)"
-docker stop  "$CONTAINER_NAME" 2>/dev/null || true
-docker rm    "$CONTAINER_NAME" 2>/dev/null || true
+# ---------- 3. Start new container on inactive port ----------
+echo "==> Stopping any stale $NEW container"
+docker stop "$NEW_NAME" 2>/dev/null || true
+docker rm   "$NEW_NAME" 2>/dev/null || true
 
-echo "==> Starting new container (color=$APP_COLOR)"
+echo "==> Starting $NEW container on port $NEW_PORT"
 docker run -d \
-  --name       "$CONTAINER_NAME" \
-  --restart    unless-stopped \
-  -p 127.0.0.1:3000:3000 \
-  -e APP_COLOR="$APP_COLOR" \
+  --name    "$NEW_NAME" \
+  --restart unless-stopped \
+  -p 127.0.0.1:$NEW_PORT:3000 \
+  -e APP_COLOR="$NEW" \
   "$IMAGE"
 
-echo "==> Writing Nginx reverse-proxy config"
-sudo tee /etc/nginx/sites-available/bobross-gallery > /dev/null <<'EOF'
+# ---------- 4. Health-check the new container directly ----------
+echo "==> Waiting for $NEW to pass /health"
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -fsS "http://127.0.0.1:$NEW_PORT/health" > /dev/null; then
+    echo "   ✓ $NEW healthy (attempt $i)"
+    break
+  fi
+  if [[ $i -eq 10 ]]; then
+    echo "   ✗ $NEW never came up — showing logs and aborting"
+    docker logs --tail=80 "$NEW_NAME" || true
+    docker stop "$NEW_NAME" || true
+    exit 1
+  fi
+  sleep 2
+done
+
+# ---------- 5. Swap Nginx upstream ----------
+echo "==> Updating Nginx upstream: $CURRENT → $NEW (port $NEW_PORT)"
+sudo tee "$NGINX_CONF" > /dev/null <<EOF
+# Managed by deploy/deploy.sh — do not edit by hand.
+# The upstream port determines which color is live (3001 = blue, 3002 = green).
+upstream bobross_app {
+    server 127.0.0.1:$NEW_PORT;
+}
+
 server {
     listen 80 default_server;
     server_name _;
 
-    # Phase 5: single container on port 3000.
-    # Phase 6 will replace this with an upstream block that swaps between
-    # blue (3001) and green (3002) for blue-green deployment.
     location / {
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass http://bobross_app;
         proxy_http_version 1.1;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 EOF
-sudo ln -sf /etc/nginx/sites-available/bobross-gallery /etc/nginx/sites-enabled/bobross-gallery
+
+sudo ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/bobross-gallery
 sudo rm   -f /etc/nginx/sites-enabled/default
 sudo nginx -t
 sudo systemctl reload nginx
 
-echo "==> Health check via Nginx"
-sleep 2
-for i in 1 2 3 4 5; do
-  if curl -fsS http://127.0.0.1/health > /dev/null; then
-    echo "==> Deploy OK (health passed on attempt $i)"
-    exit 0
-  fi
-  echo "   health not ready yet, retrying ($i/5)..."
-  sleep 2
-done
+# ---------- 6. Verify end-to-end + clean up legacy Phase 5 container ----------
+sleep 1
+if curl -fsS http://127.0.0.1/health | grep -q "\"color\":\"$NEW\""; then
+  echo "   ✓ End-to-end: Nginx is now serving $NEW"
+else
+  echo "   ✗ Nginx not serving $NEW yet — check /etc/nginx/sites-enabled/"
+  exit 1
+fi
 
-echo "==> Health check FAILED after 5 attempts"
-docker logs --tail=50 "$CONTAINER_NAME" || true
-exit 1
+# Remove the Phase 5 single-container holdover, if any.
+if docker ps --format '{{.Names}}' | grep -q "^bobross-gallery$"; then
+  echo "==> Removing legacy Phase 5 container 'bobross-gallery'"
+  docker stop bobross-gallery || true
+  docker rm   bobross-gallery || true
+fi
+
+echo "==> Deploy complete."
+echo "    Live: $NEW   |   Rollback target: $CURRENT (still running on its port)"

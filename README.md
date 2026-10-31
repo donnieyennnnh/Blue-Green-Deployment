@@ -16,7 +16,7 @@ Built in phases, one at a time. Current phase is checked.
 - [x] **Phase 3** — Ansible: SSH hardening, UFW, fail2ban, Docker, Nginx
 - [x] **Phase 4** — GitHub Actions CI: lint, test, build & push to GHCR
 - [x] **Phase 5** — GitHub Actions CD: SSH deploy to EC2
-- [ ] **Phase 6** — Blue-green containers + Nginx switch + rollback script
+- [x] **Phase 6** — Blue-green containers + Nginx switch + rollback script
 - [ ] **Phase 7** — Prometheus + Grafana (dashboards as code, one alert)
 - [ ] **Phase 8** — Polish: architecture diagram, screenshots, troubleshooting notes
 
