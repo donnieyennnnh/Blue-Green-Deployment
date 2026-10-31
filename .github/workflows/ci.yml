@@ -92,3 +92,93 @@ jobs:
           # First run is a cold build; later runs reuse unchanged layers.
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # 3. SSH to the EC2 and roll the new image out.
+  #    Pattern: ephemeral SG rule — add the runner's IP, deploy, revoke.
+  #    Means the EC2's SSH port stays locked to just the user's IP in
+  #    steady state; it only opens for the few seconds this job needs.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to EC2
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    # id-token: write is REQUIRED for OIDC — it lets GitHub mint a signed
+    # token that AWS trusts in exchange for a 1-hour role credential.
+    # No long-lived AWS keys stored anywhere.
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION:   ap-southeast-1
+      SG_TAG:       bobross-gallery-sg
+      INSTANCE_TAG: bobross-gallery-app
+      IMAGE:        ghcr.io/${{ github.repository_owner }}/bobross-gallery:latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC federation, no stored keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-deploy
+          aws-region:     ${{ env.AWS_REGION }}
+
+      - name: Look up EC2 IP and security group
+        id: aws
+        run: |
+          IP=$(aws ec2 describe-instances \
+                 --filters "Name=tag:Name,Values=$INSTANCE_TAG" \
+                           "Name=instance-state-name,Values=running" \
+                 --query "Reservations[0].Instances[0].PublicIpAddress" \
+                 --output text)
+          SG=$(aws ec2 describe-security-groups \
+                 --filters "Name=tag:Name,Values=$SG_TAG" \
+                 --query "SecurityGroups[0].GroupId" --output text)
+          if [[ -z "$IP" || "$IP" == "None" ]]; then
+            echo "::error::No running EC2 tagged Name=$INSTANCE_TAG. Did you terraform apply?"
+            exit 1
+          fi
+          echo "ip=$IP"  >> "$GITHUB_OUTPUT"
+          echo "sg=$SG"  >> "$GITHUB_OUTPUT"
+          echo "EC2 IP = $IP"
+          echo "SG  ID = $SG"
+
+      - name: Discover this runner's public IP
+        id: runner
+        run: echo "ip=$(curl -fsS https://checkip.amazonaws.com)" >> "$GITHUB_OUTPUT"
+
+      - name: Temporarily allow SSH from this runner
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ steps.aws.outputs.sg }} \
+            --protocol tcp --port 22 \
+            --cidr ${{ steps.runner.outputs.ip }}/32 \
+            || true   # tolerate "already exists" from a previous failed run
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Deploy
+        run: |
+          ssh -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -i ~/.ssh/deploy_key \
+              ubuntu@${{ steps.aws.outputs.ip }} \
+              IMAGE="$IMAGE" APP_COLOR=blue bash < deploy/deploy.sh
+
+      - name: Revoke temporary SSH access
+        if: always()   # run cleanup even if deploy failed
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ steps.aws.outputs.sg }} \
+            --protocol tcp --port 22 \
+            --cidr ${{ steps.runner.outputs.ip }}/32 \
+            || true
