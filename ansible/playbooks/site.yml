@@ -1,0 +1,196 @@
+---
+# site.yml — Phase 3: configure the EC2 so it's ready to run the app.
+#
+# What this playbook does, in order:
+#   1. SSH hardening            — no root login, no password auth
+#   2. UFW firewall             — defense in depth alongside the AWS SG
+#   3. fail2ban                 — bans IPs that fail SSH too often
+#   4. Docker + Compose plugin  — from Docker's official apt repo
+#   5. Nginx                    — placeholder; real blue-green config in Phase 6
+#
+# Fully idempotent: safe to re-run after `terraform apply` gives you a new EC2.
+
+- name: Configure the application EC2
+  hosts: app
+  become: true          # everything runs as root via sudo
+
+  tasks:
+
+    # ---------- 1. SSH hardening ----------
+    # `validate` runs `sshd -t` before saving. If the edit would make sshd
+    # refuse to start, Ansible aborts the change — can't lock ourselves out.
+
+    - name: Disable root SSH login
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+        validate: '/usr/sbin/sshd -t -f %s'
+      notify: restart sshd
+
+    - name: Disable SSH password authentication
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+        validate: '/usr/sbin/sshd -t -f %s'
+      notify: restart sshd
+
+    # Ubuntu's cloud-init sometimes drops a file in sshd_config.d/ that
+    # re-enables password auth. Remove it so our setting actually wins.
+    - name: Remove cloud-init SSH overrides (if present)
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d/50-cloud-init.conf
+        state: absent
+      notify: restart sshd
+
+    # ---------- 2. UFW (OS-level firewall) ----------
+
+    # The default AMI uses the regional mirror
+    # (e.g. ap-southeast-1.ec2.archive.ubuntu.com) which is faster but
+    # frequently mid-sync — serves inconsistent Packages.xz vs Release.
+    # Switching to the main Canonical mirror is slower but reliable.
+    - name: Use main Canonical apt mirror (regional one lags)
+      ansible.builtin.replace:
+        path: /etc/apt/sources.list
+        regexp: 'http://(?:[a-z0-9-]+\.ec2\.)?archive\.ubuntu\.com'
+        replace: 'http://archive.ubuntu.com'
+
+    # Explicitly ensure universe is enabled. fail2ban lives in universe,
+    # and some AMIs ship with it disabled. apt_repository is idempotent —
+    # no-op if the entry already exists. update_cache=true forces a refresh
+    # against the (now) main mirror so later installs see fresh indexes.
+    - name: Ensure universe repository is enabled
+      ansible.builtin.apt_repository:
+        repo: "deb http://archive.ubuntu.com/ubuntu {{ ansible_distribution_release }} universe"
+        state: present
+        update_cache: true
+
+    - name: Install ufw
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: UFW — default deny incoming
+      community.general.ufw:
+        default: deny
+        direction: incoming
+
+    - name: UFW — default allow outgoing
+      community.general.ufw:
+        default: allow
+        direction: outgoing
+
+    - name: UFW — allow SSH
+      community.general.ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+
+    - name: UFW — allow HTTP
+      community.general.ufw:
+        rule: allow
+        port: '80'
+        proto: tcp
+
+    - name: UFW — allow HTTPS
+      community.general.ufw:
+        rule: allow
+        port: '443'
+        proto: tcp
+
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled
+
+    # ---------- 3. fail2ban ----------
+    # Default config enables the sshd jail: 5 failures = 10 min ban.
+
+    - name: Install fail2ban
+      ansible.builtin.apt:
+        name: fail2ban
+        state: present
+
+    - name: Enable and start fail2ban
+      ansible.builtin.systemd:
+        name: fail2ban
+        enabled: true
+        state: started
+
+    # ---------- 4. Docker (official repo, not Ubuntu's old packages) ----------
+
+    - name: Install Docker apt prerequisites
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+
+    - name: Create apt keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Docker's official GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+        force: false       # don't re-download on every run
+
+    - name: Add Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/ubuntu
+          {{ ansible_distribution_release }} stable
+        state: present
+        filename: docker
+
+    - name: Install Docker Engine + Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Add ubuntu user to docker group
+      ansible.builtin.user:
+        name: ubuntu
+        groups: docker
+        append: true
+      # User needs to log out and back in before this takes effect in
+      # interactive SSH; Ansible itself uses sudo so unaffected.
+
+    - name: Enable and start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    # ---------- 5. Nginx (placeholder — real config in Phase 6) ----------
+
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    - name: Enable and start Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: started
+
+  handlers:
+    # Handlers run once at the end if any `notify:`-ing task reported changed.
+    - name: restart sshd
+      ansible.builtin.systemd:
+        name: ssh
+        state: restarted
