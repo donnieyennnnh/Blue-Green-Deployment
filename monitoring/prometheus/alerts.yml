@@ -1,0 +1,27 @@
+# alerts.yml — one basic alert rule.
+#
+# For a learning project we define the rule but don't wire up Alertmanager
+# / email / Slack delivery. Alerts show up in the Prometheus UI
+# (http://localhost:9090/alerts) and on the Grafana dashboard.
+# Phase 8 polish can add Alertmanager + a notification channel.
+
+groups:
+  - name: bobross
+    rules:
+      - alert: AppInstanceDown
+        expr: up{job="bobross-gallery"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary:     "App instance {{ $labels.instance }} is down"
+          description: "{{ $labels.instance }} has failed /metrics scrapes for 2+ minutes."
+
+      - alert: HighHostCPU
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary:     "EC2 CPU above 85% for 5 minutes"
+          description: "Host {{ $labels.instance }} sustained CPU usage {{ $value | printf \"%.1f\" }}%."

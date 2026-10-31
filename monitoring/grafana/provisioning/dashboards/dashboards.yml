@@ -1,0 +1,13 @@
+# Tells Grafana where to find dashboard JSON files to auto-import.
+# Any .json file in the mounted path gets loaded as a dashboard.
+apiVersion: 1
+
+providers:
+  - name:            bobross
+    orgId:           1
+    folder:          'Bob Ross'
+    type:            file
+    disableDeletion: false
+    editable:        true
+    options:
+      path: /var/lib/grafana/dashboards
