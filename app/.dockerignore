@@ -17,5 +17,7 @@ coverage
 test
 tests
 *.test.js
+eslint.config.js
+.eslintrc*
 .vscode
 .idea

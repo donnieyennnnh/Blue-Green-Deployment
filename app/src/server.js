@@ -64,14 +64,22 @@ app.get('/metrics', async (_req, res) => {
   res.send(await register.metrics());
 });
 
-// --- Startup ---
-const server = app.listen(PORT, () => {
-  console.log(`[${COLOR}] listening on :${PORT}`);
-});
+// Export the Express app for tests to require() without starting a listener.
+module.exports = app;
 
-// Graceful shutdown — matters in Phase 6 when deploys swap containers.
-// Without this, Docker SIGKILLs after 10s and in-flight requests drop.
-process.on('SIGTERM', () => {
-  console.log(`[${COLOR}] SIGTERM received, closing`);
-  server.close(() => process.exit(0));
-});
+// --- Startup ---
+// Only run the listener when the file is executed directly (`node server.js`).
+// When required by a test (`require('../src/server')`), skip this block so
+// tests don't collide with a real listening port.
+if (require.main === module) {
+  const server = app.listen(PORT, () => {
+    console.log(`[${COLOR}] listening on :${PORT}`);
+  });
+
+  // Graceful shutdown — matters in Phase 6 when deploys swap containers.
+  // Without this, Docker SIGKILLs after 10s and in-flight requests drop.
+  process.on('SIGTERM', () => {
+    console.log(`[${COLOR}] SIGTERM received, closing`);
+    server.close(() => process.exit(0));
+  });
+}
