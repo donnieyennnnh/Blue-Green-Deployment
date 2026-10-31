@@ -90,7 +90,7 @@ function index(paintings, color) {
 
   const body = `
     <header class="site">
-      <h1>The Joy of Deploying v2</h1>
+      <h1>The Joy of Deploying v3</h1>
       <p>A Bob Ross gallery, served with zero downtime.</p>
     </header>
     <main>
